@@ -7,4 +7,4 @@
 - insert:
     - id: dsh-tui
       name: 'file:///D:/Code/DeepSeek-Harness-CLI/dsh-tui/tui.mjs'
-      inject: [agents, agentDefaultModel, sessions, approval, cmdlineArgs]
+      inject: [agents, agentDefaultModel, sessions, approval, commands, userQuestions, cmdlineArgs]

@@ -22,7 +22,7 @@ import {
 } from './themes.mjs'
 
 export const name = 'dsh-tui'
-export const inject = ['agents', 'agentDefaultModel', 'sessions', 'approval', 'cmdlineArgs']
+export const inject = ['agents', 'agentDefaultModel', 'sessions', 'approval', 'commands', 'userQuestions', 'cmdlineArgs']
 
 const HELP = [
   'dsh-tui commands:',
@@ -77,6 +77,8 @@ async function run(ctx) {
   const defaultModel = ctx.get('agentDefaultModel')
   const sessions = ctx.get('sessions')
   const approval = ctx.get('approval')
+  const commands = ctx.get('commands')
+  const userQuestions = ctx.get('userQuestions')
   const exit = ctx.get('appExit')
   const cmdline = ctx.get('cmdlineArgs')
   if (!agents || !defaultModel || !sessions || !approval || !exit) {
@@ -91,6 +93,7 @@ async function run(ctx) {
   let tui = null
   let editor = null
   let pendingApproval = null
+  let pendingQuestion = null // { request, resolve } from ctx.userQuestions
   let busy = false
   let agent
   let oneShot = false // line mode + initial task: exit after that turn
@@ -155,6 +158,19 @@ async function run(ctx) {
         if (matchesKey(data, 'n')) { const p = pendingApproval; pendingApproval = null; setReady(); p.resolve('rejected'); return { consume: true } }
         return { consume: true }
       }
+      if (pendingQuestion) {
+        const q = pendingQuestion.request.questions[0]
+        const count = q?.options?.length ?? 0
+        for (let i = 0; i < count; i++) {
+          if (matchesKey(data, String(i + 1))) { resolveQuestion(q, String(i + 1)); return { consume: true } }
+        }
+        if (matchesKey(data, 'escape')) {
+          const p = pendingQuestion; pendingQuestion = null; setReady()
+          p.resolve({ answers: [{ id: q.id, selected: [] }] })
+          return { consume: true }
+        }
+        return { consume: true }
+      }
       if (matchesKey(data, 'ctrl+c')) {
         if (busy) { try { agent?.cancel('interrupted') } catch { /* ignore */ } setStatus(statusStyle.ok, 'interrupted — ready') }
         else { tui.stop(); exit(0) }
@@ -175,9 +191,61 @@ async function run(ctx) {
     if (lineMode) process.stdout.write(`\n[dsh-tui] ${stripAnsi(prompt)}\n`)
   }))
 
+  // ======================= user-questions provider ========================
+  // The agent (and plan review via exit_plan_mode) can pause and ask the human.
+  // We present the question and collect an answer through the same input plane.
+  function renderQuestion(request) {
+    const q = request.questions[0]
+    const options = q?.options ?? []
+    const header = q?.header ? `${q.header}\n` : ''
+    const detail = q?.detail ? `\n${q.detail}` : ''
+    const list = options.map((o, i) => `  ${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n')
+    const promptText = `${header}${q?.question ?? ''}${detail}\n${list}\nselect (${options.length ? `1-${options.length}` : 'free text'}):`
+    setStatus(statusStyle.approval, `question: ${q?.question ?? ''}`)
+    if (lineMode) process.stdout.write(`\n[dsh-tui] ${stripAnsi(promptText)}\n`)
+  }
+
+  if (userQuestions) {
+    userQuestions.registerProvider({
+      ask: (request) => new Promise((resolve) => {
+        pendingQuestion = { request, resolve }
+        renderQuestion(request)
+      }),
+    })
+  }
+
+  function answerQuestion(q, raw) {
+    const options = q?.options ?? []
+    const selected = []
+    let custom
+    if (options.length > 0) {
+      const idx = Number(raw) - 1
+      const byLabel = options.find((o) => o.label === raw)
+      if (byLabel) selected.push(byLabel.label)
+      else if (Number.isInteger(idx) && options[idx]) selected.push(options[idx].label)
+      else return null
+    } else {
+      custom = raw.trim() || undefined
+    }
+    return { answers: [{ id: q.id, selected, custom }] }
+  }
+
+  function resolveQuestion(q, raw) {
+    const answer = answerQuestion(q, raw)
+    if (answer === null) {
+      setStatus(statusStyle.error, `invalid choice — pick 1-${q?.options?.length ?? 0}`)
+      return
+    }
+    const p = pendingQuestion
+    pendingQuestion = null
+    setReady()
+    p.resolve(answer)
+  }
+
   // ======================= live event stream ==============================
   ctx.on('session/event', (session, event) => {
     if (session !== agent?.session) return
+    if (lineMode && process.env.DSH_TUI_DEBUG) process.stdout.write(`[evt] ${event.type}\n`)
     try { handleEvent(event) } catch (err) { setStatus(statusStyle.error, `render error: ${err.message}`) }
   })
 
@@ -251,6 +319,34 @@ async function run(ctx) {
         break
       }
 
+      // ---- native service events (plan / goal / todo / subagent / commands) ----
+      case 'plan/mode':
+        sink.addLine(labelSystem(d.active ? '📋 plan mode on' : 'plan mode off'))
+        break
+      case 'goal/change':
+        sink.addLine(labelSystem(`🎯 goal: ${d.goal ?? ''}`))
+        break
+      case 'todo/write': {
+        const items = (d.todos ?? []).map((t) => `${t.completed ? '☑' : '☐'} ${t.content}`).join('\n')
+        if (items) sink.addLine(labelSystem(`📝 ${items}`))
+        break
+      }
+      case 'subagent/descriptor':
+        sink.addLine(labelSystem(`🧩 subagent: ${d.name ?? ''} ${d.status ?? ''}`))
+        break
+      case 'command/run':
+        sink.addLine(labelSystem(`▶ /${d.name}${d.args ? ` ${d.args.join(' ')}` : ''}`))
+        break
+      case 'command/done':
+        if (d.outcome?.kind === 'error') setStatus(statusStyle.error, 'command failed')
+        break
+      case 'compaction/start':
+        setStatus(statusStyle.working, 'compacting context…')
+        break
+      case 'compaction/end':
+        setStatus(statusStyle.ok, 'compacted')
+        break
+
       default:
         break
     }
@@ -267,18 +363,50 @@ async function run(ctx) {
   function runCommand(line) {
     const [cmd] = line.split(/\s+/)
     switch (cmd) {
-      case '/quit': case '/exit': tui?.stop(); exit(0); break
-      case '/help': sink.addLine(labelSystem(HELP)); break
-      case '/clear': sink.clear(); break
+      case '/quit': case '/exit': tui?.stop(); exit(0); return
+      case '/clear': sink.clear(); return
       case '/approve-test': {
         if (busy) { setStatus(statusStyle.error, 'busy — run /approve-test when idle'); return }
         try { approval.setPolicy(agent, 'ask') } catch { /* policy write path may vary */ }
         approveTestOnTurn = true
         sendUser('只回复一个词：ok。不要调用任何工具。')
-        break
+        return
       }
-      default: setStatus(statusStyle.error, `unknown command: ${cmd} — try /help`)
+      case '/question-test': {
+        if (!userQuestions) { setStatus(statusStyle.error, 'userQuestions unavailable'); return }
+        void userQuestions.ask({
+          questions: [{ id: 'test-q', question: '你更倾向于哪个方向？', options: [{ label: '原生命令' }, { label: '更多事件渲染' }, { label: '会话恢复' }] }],
+        }).then((answer) => {
+          const a = answer?.answers?.[0]
+          if (lineMode) process.stdout.write(`\n[dsh-tui] question answer: ${JSON.stringify(a)}\n`)
+          else setStatus(statusStyle.ok, `answer: ${JSON.stringify(a)}`)
+        }).catch((err) => setStatus(statusStyle.error, `question error: ${err.message}`))
+        return
+      }
+      case '/help': {
+        const native = commands ? commands.list(agent).map((c) => `/${c.name}`) : []
+        const text = HELP + (native.length ? `\nNative commands: ${native.join(' ')}\n` : '')
+        sink.addLine(labelSystem(text))
+        return
+      }
+      default: break
     }
+    // Everything else goes through the official command plane (plan, goal,
+    // compact, ...). Unknown commands are rejected, not sent to the model.
+    if (commands) {
+      if (lineMode && process.env.DSH_TUI_DEBUG) process.stdout.write(`[cmd] executing '${line}'\n`)
+      const controller = new AbortController() // commands.execute needs a signal
+      void commands.execute(agent, line, controller.signal).then((result) => {
+        if (lineMode && process.env.DSH_TUI_DEBUG) process.stdout.write(`[cmd] done '${line}' result=${result === undefined ? 'undefined' : typeof result}\n`)
+        if (result === undefined) setStatus(statusStyle.error, `unknown command: ${cmd} — try /help`)
+        else if (result?.outcome?.kind === 'error') setStatus(statusStyle.error, `command ${cmd} failed`)
+      }).catch((err) => {
+        if (lineMode && process.env.DSH_TUI_DEBUG) process.stdout.write(`[cmd] catch '${line}': ${err.message}\n`)
+        setStatus(statusStyle.error, `command ${cmd} error: ${err.message}`)
+      })
+      return
+    }
+    setStatus(statusStyle.error, `unknown command: ${cmd} — try /help`)
   }
 
   function onInput(text) {
@@ -323,6 +451,10 @@ async function run(ctx) {
         while ((idx = buf.indexOf('\n')) !== -1) {
           const line = buf.slice(0, idx).trimEnd()
           buf = buf.slice(idx + 1)
+          if (pendingQuestion) {
+            resolveQuestion(pendingQuestion.request.questions[0], line.trim())
+            continue
+          }
           if (pendingApproval) {
             const p = pendingApproval
             const ans = line.trim().toLowerCase()
