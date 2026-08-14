@@ -22,7 +22,7 @@ import {
 } from './themes.mjs'
 
 export const name = 'dsh-tui'
-export const inject = ['agents', 'agentDefaultModel', 'sessions', 'approval', 'headlessStartup']
+export const inject = ['agents', 'agentDefaultModel', 'sessions', 'approval', 'cmdlineArgs']
 
 const HELP = [
   'dsh-tui commands:',
@@ -65,7 +65,7 @@ async function run(ctx) {
   const sessions = ctx.get('sessions')
   const approval = ctx.get('approval')
   const exit = ctx.get('appExit')
-  const startup = ctx.get('headlessStartup')
+  const cmdline = ctx.get('cmdlineArgs')
   if (!agents || !defaultModel || !sessions || !approval || !exit) {
     throw new Error(`dsh-tui: missing services agents=${!!agents} model=${!!defaultModel} sessions=${!!sessions} approval=${!!approval} exit=${!!exit}`)
   }
@@ -81,6 +81,7 @@ async function run(ctx) {
   let busy = false
   let agent
   let oneShot = false // line mode + initial task: exit after that turn
+  let approveTestOnTurn = false // /approve-test: fire a synthetic request next turn
 
   if (lineMode) {
     sink = {
@@ -162,6 +163,20 @@ async function run(ctx) {
       case 'turn/start':
         reasoningAcc = ''
         setWorking()
+        if (approveTestOnTurn) {
+          approveTestOnTurn = false
+          setImmediate(() => {
+            approval.request({ agent, toolName: 'approval-test', reason: 'synthetic test request' })
+              .then((o) => {
+                setStatus(statusStyle.ok, `approval outcome: ${o}`)
+                if (lineMode) process.stdout.write(`\n[dsh-tui] approval outcome: ${o}\n`)
+              })
+              .catch((e) => {
+                setStatus(statusStyle.error, `approval error: ${e.message}`)
+                if (lineMode) process.stdout.write(`\n[dsh-tui] approval error: ${e.message}\n`)
+              })
+          })
+        }
         break
 
       case 'assistant/chunk': {
@@ -233,6 +248,13 @@ async function run(ctx) {
       case '/quit': case '/exit': tui?.stop(); exit(0); break
       case '/help': sink.addLine(labelSystem(HELP)); break
       case '/clear': sink.clear(); break
+      case '/approve-test': {
+        if (busy) { setStatus(statusStyle.error, 'busy — run /approve-test when idle'); return }
+        try { approval.setPolicy(agent, 'ask') } catch { /* policy write path may vary */ }
+        approveTestOnTurn = true
+        sendUser('只回复一个词：ok。不要调用任何工具。')
+        break
+      }
       default: setStatus(statusStyle.error, `unknown command: ${cmd} — try /help`)
     }
   }
@@ -259,7 +281,7 @@ async function run(ctx) {
   }))
   await agent.whenIdle()
 
-  const initial = startup?.task?.trim()
+  const initial = (cmdline?.get?.() ?? []).join(' ').trim()
 
   if (lineMode) {
     if (initial) {
@@ -279,6 +301,14 @@ async function run(ctx) {
         while ((idx = buf.indexOf('\n')) !== -1) {
           const line = buf.slice(0, idx).trimEnd()
           buf = buf.slice(idx + 1)
+          if (pendingApproval) {
+            const p = pendingApproval
+            const ans = line.trim().toLowerCase()
+            if (ans === 'y') { pendingApproval = null; setReady(); p.resolve('allowed-once') }
+            else if (ans === 'n') { pendingApproval = null; setReady(); p.resolve('rejected') }
+            else setStatus(statusStyle.error, 'reply y or n to the approval prompt')
+            continue
+          }
           if (line) onInput(line)
         }
       })
