@@ -1,0 +1,6 @@
+# Approval-probe overlay: disable the one-shot runner, mount the probe plugin.
+- id: headless-runner
+  disabled: true
+- insert:
+    - id: approval-probe
+      name: 'file:///D:/Code/DeepSeek-Harness-CLI/approval-probe/probe.mjs'
