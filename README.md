@@ -17,18 +17,28 @@ Both are official. What's missing is the **interactive terminal middle ground** 
 
 ## Status
 
-- ✅ **Spike A** — headless engine runs end-to-end against any OpenAI/Anthropic-compatible gateway (see `spike-a` findings).
+- ✅ **Spike A** — headless engine runs end-to-end against any OpenAI/Anthropic-compatible gateway.
 - ✅ **Spike B** — live event seam proven: a tiny injected plugin streams `reasoning-delta` / `tool-call-delta` / `text-delta` / tool cards / turn lifecycle in real time (`spike-b/`).
-- 🚧 **TUI build** — in progress.
+- ✅ **Approval seam** — bidirectional allow/deny round-trip verified without any web adapter (`approval-probe/`).
+- ✅ **TUI core** — interactive multi-turn chat, live transcript, tool cards, reasoning, approval prompts (`dsh-tui/`). Line mode verified end-to-end; full-screen pi-tui UI ready for a real terminal.
 
-## Getting started
+## Running
 
-Prereqs: Node 20+, a running DeepSeek Harness install (`npx @deepseek-ai/dsh`), and an API key reachable via a provider configured in `~/.dsh/settings.yaml`.
+Prereqs: Node 20+, a DeepSeek Harness install (`npx @deepseek-ai/dsh`), and a model provider configured in `~/.dsh/settings.yaml` (with the key available via its `apiKeyEnv`).
 
 ```sh
-# verify the headless engine works with your gateway
-DEEPSEEK_API_KEY=sk-... npx @deepseek-ai/dsh --profile headless "run a test task"
+# interactive full-screen TUI (run in a real terminal)
+npx @deepseek-ai/dsh --profile tui
+
+# with an initial task
+npx @deepseek-ai/dsh --profile tui "explain this repo"
+
+# piped / non-TTY: line-mode REPL, or one-shot with a task
+echo "list files" | npx @deepseek-ai/dsh --profile tui
+npx @deepseek-ai/dsh --profile tui "list files" < /dev/null
 ```
+
+The `tui` profile is created under `$DSH_HOME/profiles/tui` and mounts the local plugin. Commands inside the TUI: `/help`, `/clear`, `/quit` (or Ctrl+C when idle), `/approve-test` (exercises the approval prompt).
 
 ## Project layout
 

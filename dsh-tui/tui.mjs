@@ -47,6 +47,19 @@ const preview = (v, max = 100) => {
 
 const truncate = (s, max) => (s.length > max ? `${s.slice(0, max)}…` : s)
 
+/** Render tool-call args readably: pull out command + description for shell tools. */
+function fmtToolArgs(args) {
+  try {
+    const obj = JSON.parse(args)
+    if (obj && typeof obj === 'object' && obj.command && obj.description) {
+      return truncate(`${obj.description}  (${obj.command})`, 120)
+    }
+    return truncate(JSON.stringify(obj), 120)
+  } catch {
+    return truncate(String(args), 120)
+  }
+}
+
 export function apply(ctx) {
   // Fire-and-forget, like headless-runner: awaiting the loader inline would
   // deadlock the tree.
@@ -90,6 +103,7 @@ async function run(ctx) {
       endStream: () => process.stdout.write('\n'),
       status: () => {},
       clear: () => {},
+      reason: () => {},
     }
   } else {
     const terminal = new ProcessTerminal()
@@ -105,6 +119,7 @@ async function run(ctx) {
     ]))
 
     let streaming = null // { markdown, text }
+    let reasoning = null // { line, text }
     sink = {
       addLine: (styled) => { transcript.addChild(new Text(styled, 1, 0)); tui.requestRender() },
       stream: (text) => {
@@ -117,8 +132,18 @@ async function run(ctx) {
         streaming.markdown.setText(streaming.text)
         tui.requestRender()
       },
+      reason: (text) => {
+        if (!reasoning) {
+          reasoning = { line: new Text('', 1, 0), text: '' }
+          transcript.addChild(reasoning.line)
+        }
+        reasoning.text = text
+        reasoning.line.setText(labelReasoning(`… ${truncate(text.trim(), 300)}`))
+        tui.requestRender()
+      },
       endStream: (full) => {
         if (streaming) { streaming.markdown.setText(full ?? streaming.text); streaming = null; tui.requestRender() }
+        if (reasoning) { reasoning = null; tui.requestRender() }
       },
       status: (styled) => { status.setText(styled); tui.requestRender() },
       clear: () => { transcript.clear(); tui.requestRender() },
@@ -183,11 +208,8 @@ async function run(ctx) {
         const c = d.chunk ?? {}
         if (c.type === 'text-delta') sink.stream(c.text ?? '')
         else if (c.type === 'reasoning-delta') {
-          // keep a compact dim hint in TTY mode; silent in line mode
           reasoningAcc += c.text ?? ''
-          if (!lineMode && reasoningAcc.length % 64 < 8) {
-            // (placeholder — full reasoning UI deferred)
-          }
+          sink.reason(reasoningAcc)
         }
         break
       }
@@ -208,7 +230,7 @@ async function run(ctx) {
       }
 
       case 'tool/call':
-        sink.addLine(labelTool(d.name, preview(d.arguments)))
+        sink.addLine(labelTool(d.name, fmtToolArgs(d.arguments)))
         setStatus(statusStyle.working, `running ${d.name}…`)
         break
 
@@ -315,11 +337,12 @@ async function run(ctx) {
       process.stdin.on('end', () => { exit(0) })
     }
   } else {
+    // Start the terminal first; renders/components after are safe.
+    editor.onSubmit = (raw) => onInput(raw)
+    tui.start()
     tui.setFocus(editor)
     sink.addLine(labelSystem('dsh-tui — DeepSeek Harness terminal UI. Type a task or /help.'))
     setReady()
-    editor.onSubmit = (raw) => onInput(raw)
-    tui.start()
     if (initial) setImmediate(() => { try { onInput(initial) } catch { /* not ready */ } })
   }
 }
