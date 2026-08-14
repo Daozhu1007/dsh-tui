@@ -1,0 +1,8 @@
+# Spike B — overlay patch that inserts the live session streamer into the
+# tree. Applied on top of a working profile (e.g. the headless profile) via
+#   dsh --profile headless --patch ./streamer.patch.yml "task"
+# The headless runner drives the agent; this entry only observes and prints.
+
+- insert:
+    - id: spike-b-streamer
+      name: 'file:///D:/Code/DeepSeek-Harness-CLI/spike-b/streamer.mjs'

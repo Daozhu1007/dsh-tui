@@ -1,0 +1,23 @@
+# deps
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+lib/
+*.tsbuildinfo
+
+# logs & scratch
+*.log
+last-run.*
+
+# env & secrets — never commit keys
+.env
+.env.*
+*.local
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
