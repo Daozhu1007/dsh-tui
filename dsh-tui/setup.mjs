@@ -40,7 +40,7 @@ writeFileSync(join(dir, 'cordis.patch.yml'), [
   '- insert:',
   '    - id: dsh-tui',
   `      name: '${pluginUrl}'`,
-  '      inject: [agents, agentDefaultModel, sessions, approval, commands, userQuestions, cmdlineArgs]',
+  '      inject: [agents, agentDefaultModel, sessions, approval, commands, userQuestions, sessionQuery, cmdlineArgs]',
   '',
 ].join('\n'))
 

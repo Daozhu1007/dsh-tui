@@ -22,14 +22,17 @@ import {
 } from './themes.mjs'
 
 export const name = 'dsh-tui'
-export const inject = ['agents', 'agentDefaultModel', 'sessions', 'approval', 'commands', 'userQuestions', 'cmdlineArgs']
+export const inject = ['agents', 'agentDefaultModel', 'sessions', 'approval', 'commands', 'userQuestions', 'sessionQuery', 'cmdlineArgs']
 
 const HELP = [
   'dsh-tui commands:',
-  '  /help      show this help',
-  '  /clear     clear the transcript',
-  '  /quit      exit (or Ctrl+C when idle)',
-  '  <anything else>   send a task to the agent',
+  '  /help       this help (+ native commands below)',
+  '  /resume     list persisted sessions and pick one to continue',
+  '  /clear      clear the transcript',
+  '  /quit       exit (or Ctrl+C when idle)',
+  '  /approve-test   exercise the approval prompt',
+  '  /question-test  exercise an agent question',
+  '  <anything else>  send a task to the agent',
   '',
 ].join('\n')
 
@@ -79,6 +82,7 @@ async function run(ctx) {
   const approval = ctx.get('approval')
   const commands = ctx.get('commands')
   const userQuestions = ctx.get('userQuestions')
+  const sessionQuery = ctx.get('sessionQuery')
   const exit = ctx.get('appExit')
   const cmdline = ctx.get('cmdlineArgs')
   if (!agents || !defaultModel || !sessions || !approval || !exit) {
@@ -94,6 +98,7 @@ async function run(ctx) {
   let editor = null
   let pendingApproval = null
   let pendingQuestion = null // { request, resolve } from ctx.userQuestions
+  let pendingResume = null // { records } — user is picking a session to resume
   let busy = false
   let agent
   let oneShot = false // line mode + initial task: exit after that turn
@@ -171,6 +176,15 @@ async function run(ctx) {
         }
         return { consume: true }
       }
+      if (pendingResume) {
+        const p = pendingResume
+        const count = Math.min(p.records.length, 20)
+        for (let i = 0; i < count; i++) {
+          if (matchesKey(data, String(i + 1))) { void doResume(p.records, i); return { consume: true } }
+        }
+        if (matchesKey(data, 'escape')) { pendingResume = null; setReady(); return { consume: true } }
+        return { consume: true }
+      }
       if (matchesKey(data, 'ctrl+c')) {
         if (busy) { try { agent?.cancel('interrupted') } catch { /* ignore */ } setStatus(statusStyle.ok, 'interrupted — ready') }
         else { tui.stop(); exit(0) }
@@ -240,6 +254,39 @@ async function run(ctx) {
     pendingQuestion = null
     setReady()
     p.resolve(answer)
+  }
+
+  // ======================= session resume ================================
+  function renderResumeList(records) {
+    const shown = records.slice(0, 20)
+    const lines = shown.map((r, i) => `  ${i + 1}. ${r.header?.id ?? '?'}  ${r.header?.cwd ?? ''}`).join('\n')
+    const text = `resume a session:\n${lines}\nenter 1-${shown.length}:`
+    if (lineMode) process.stdout.write(`\n[dsh-tui] ${stripAnsi(text)}\n`)
+    else setStatus(statusStyle.approval, `resume which session? (1-${shown.length})`)
+  }
+
+  async function doResume(records, idx) {
+    const record = records[idx]
+    pendingResume = null
+    if (lineMode && process.env.DSH_TUI_DEBUG) process.stdout.write(`[resume] picking idx=${idx} id=${record?.header?.id ?? 'none'}\n`)
+    if (!record) { setStatus(statusStyle.error, 'invalid session'); return }
+    const sid = record.header?.id
+    if (!sid) { setStatus(statusStyle.error, 'session has no id'); return }
+    const selection = defaultModel.currentSelection()
+    try {
+      const resumed = await agents.resume({
+        resumeSessionId: typeof sid === 'string' ? SessionId(sid) : sid,
+        agentOptions: { provider: selection.provider, model: selection.model },
+        setup: (agentCtx) => { installModelSelection(agentCtx, { current: selection, assembled: undefined }) },
+      })
+      agent = resumed.agent
+      await agent.whenIdle()
+      setReady()
+      if (lineMode && process.env.DSH_TUI_DEBUG) process.stdout.write(`[resume] done -> ${sid}\n`)
+      sink.addLine(labelSystem(`resumed session ${sid}`))
+    } catch (err) {
+      setStatus(statusStyle.error, `resume failed: ${err.message}`)
+    }
   }
 
   // ======================= live event stream ==============================
@@ -383,6 +430,15 @@ async function run(ctx) {
         }).catch((err) => setStatus(statusStyle.error, `question error: ${err.message}`))
         return
       }
+      case '/resume': {
+        if (!sessionQuery) { setStatus(statusStyle.error, 'session-query unavailable'); return }
+        void sessionQuery.listSessions().then((records) => {
+          if (!records?.length) { sink.addLine(labelSystem('no sessions found')); return }
+          pendingResume = { records }
+          renderResumeList(records)
+        }).catch((err) => setStatus(statusStyle.error, `list sessions failed: ${err.message}`))
+        return
+      }
       case '/help': {
         const native = commands ? commands.list(agent).map((c) => `/${c.name}`) : []
         const text = HELP + (native.length ? `\nNative commands: ${native.join(' ')}\n` : '')
@@ -453,6 +509,11 @@ async function run(ctx) {
           buf = buf.slice(idx + 1)
           if (pendingQuestion) {
             resolveQuestion(pendingQuestion.request.questions[0], line.trim())
+            continue
+          }
+          if (pendingResume) {
+            const p = pendingResume
+            void doResume(p.records, Number(line.trim()) - 1)
             continue
           }
           if (pendingApproval) {
