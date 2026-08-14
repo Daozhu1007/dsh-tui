@@ -38,7 +38,17 @@ echo "list files" | npx @deepseek-ai/dsh --profile tui
 npx @deepseek-ai/dsh --profile tui "list files" < /dev/null
 ```
 
-The `tui` profile is created under `$DSH_HOME/profiles/tui` and mounts the local plugin. Commands inside the TUI: `/help`, `/clear`, `/quit` (or Ctrl+C when idle), `/approve-test` (exercises the approval prompt).
+The `tui` profile is created under `$DSH_HOME/profiles/tui` (see `dsh-tui/setup.mjs`) and mounts the local plugin. Commands inside the TUI: `/help`, `/resume` (pick a persisted session to continue), `/clear`, `/quit` (or Ctrl+C when idle), `/approve-test`, `/question-test`. Native harness commands (`/plan`, `/goal`, `/compact`, `/feedback`, `/permission`) dispatch through the official command plane.
+
+### Native integration
+
+`dsh-tui` runs in-process over `dsh-base`, so the entire official service surface is already live and rendered/controlled from the terminal:
+
+- **Commands** — `/plan [msg]`, `/goal`, `/compact`, ... dispatch through `ctx.commands` (the official plane). Verified: `/plan` ↔ `/plan off` round-trip.
+- **Questions** — a `ctx.userQuestions` provider lets the agent (and plan review via `exit_plan_mode`) ask you numbered options; answered with number keys (full-screen) or a number (line mode).
+- **Approvals** — a `ctx.approval` answerer presents y/n prompts.
+- **Events rendered** — plan/mode, goal/change, todo/write, subagent/descriptor, command/run, command/done, compaction, tool calls/results, streaming text, reasoning.
+- **Resume** — `/resume` lists persisted sessions via `ctx.sessionQuery` and loads one with `agents.resume`.
 
 ## Project layout
 
