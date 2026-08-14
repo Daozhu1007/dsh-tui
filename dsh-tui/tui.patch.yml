@@ -1,0 +1,8 @@
+# dsh-tui dev overlay: disable the one-shot runner, mount the interactive TUI.
+# (headless-startup is already provided by the dsh-headless bundle.)
+- id: headless-runner
+  disabled: true
+- insert:
+    - id: dsh-tui
+      name: 'file:///D:/Code/DeepSeek-Harness-CLI/dsh-tui/tui.mjs'
+      inject: [agents, agentDefaultModel, sessions, approval, headlessStartup]
